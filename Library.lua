@@ -74,6 +74,10 @@ local Library = {
 	-- Dropdown open / close animation length. 0 disables it.
 	DropdownAnimationTime = 0.16;
 
+	-- Functions run whenever the menu is opened or closed. Popout panels use
+	-- this so they hide and come back with the menu they belong to.
+	MenuToggledCallbacks = {};
+
 	-- Nil makes the toggle checkmark pick black or white automatically,
 	-- based on how bright the fill sitting behind it is.
 	CheckmarkColor = nil;
@@ -493,6 +497,21 @@ function Library:IsMouseOverFrame(Frame)
 
 		return true;
 	end;
+end;
+
+---Whether the menu is currently on screen.
+---@return boolean
+function Library:IsMenuOpen()
+	return _UI_IS_VISIBLE == true;
+end;
+
+---Run a function whenever the menu is opened or closed. Called with the new
+---visibility.
+---@param Func function
+---@return function
+function Library:OnMenuToggled(Func)
+	table.insert(Library.MenuToggledCallbacks, Func);
+	return Func;
 end;
 
 function Library:UpdateDependencyBoxes()
@@ -4672,8 +4691,17 @@ function Library:CreatePopout(Config)
 
 	if typeof(Config.Position) ~= 'UDim2' then Config.Position = UDim2.fromOffset(175, 50) end;
 
+	-- Size comes in as a Vector2 normally, but a UDim2 or nothing at all has to
+	-- survive too, since Resize below reads Config.Size.X straight back out.
+	if typeof(Config.Size) == 'UDim2' then
+		Config.Size = Vector2.new(Config.Size.X.Offset, Config.Size.Y.Offset);
+	elseif typeof(Config.Size) ~= 'Vector2' then
+		Config.Size = Vector2.new(300, 200);
+	end;
 
-	--if typeof(Config.Size) ~= 'UDim2' then Config.Size = UDim2.fromOffset(550, 600) end;
+	if type(Config.AutoShow) ~= 'boolean' then
+		Config.AutoShow = false;
+	end;
 
 	if Config.Center then
 		Config.AnchorPoint = Vector2.new(0.5, 0.5);
@@ -6360,6 +6388,11 @@ function Library:CreateWindow(...)
 		Library:UpdateBackgroundDim();
 		Library:UpdateSnow();
 
+		-- Anything hanging off the menu (popout panels, mostly) follows it.
+		for _, Func in next, Library.MenuToggledCallbacks do
+			pcall(Func, Toggled);
+		end;
+
 		if Toggled then
 			-- A bit scuffed, but if we're going from not toggled -> toggled we want to show the frame immediately so that the fade is visible.
 			Outer.Visible = true;
@@ -6489,13 +6522,43 @@ do
 	Builders.Toggle = function(Groupbox, Element, UI)
 		local Idx = resolveIdx(Element, Element.Text);
 
+		-- A toggle can own a popout panel. Flipping it shows the panel, and the
+		-- caller's own callback still runs exactly as it would have.
+		local Panel = nil;
+
+		if type(Element.Panel) == 'table' then
+			Panel = Library:CreatePanel(Element.Panel);
+			UI.Panels[Idx] = Panel;
+		end;
+
 		local Toggle = Groupbox:AddToggle(Idx, {
 			Text = Element.Text or Element.Name or '';
 			Default = Element.Default or false;
 			Tooltip = Element.Tooltip;
 			Risky = Element.Risky;
-			Callback = Element.Callback;
+
+			Callback = function(Value)
+				if Panel then
+					Panel:SetVisible(Value);
+				end;
+
+				if Element.Callback then
+					Element.Callback(Value);
+				end;
+			end;
 		});
+
+		if Panel then
+			Toggle.Panel = Panel;
+
+			-- The panel's own close cross flips the toggle back off, so the two
+			-- can never drift out of sync.
+			Panel.OnClose = function()
+				Toggle:SetValue(false);
+			end;
+
+			Panel:SetVisible(Toggle.Value);
+		end;
 
 		applyAddons(Toggle, Element, UI);
 
@@ -6639,6 +6702,134 @@ do
 		end;
 	end;
 
+	---A small standalone window a toggle can pop up, built from the same element
+	---list a groupbox takes. It sizes itself to fit, drags by its title bar and
+	---hides with the menu unless FollowMenu is turned off.
+	---@param Config table Title, Size, Position, Elements and friends
+	---@return table
+	function Library:CreatePanel(Config)
+		Config = Config or {};
+
+		local Panel = setmetatable({
+			Type = 'Panel';
+			Tabs = {};
+			Groupboxes = {};
+			Elements = {};
+			Panels = {};
+
+			-- What the owning toggle last asked for, separate from whether the
+			-- panel is actually on screen right now.
+			Wanted = Config.AutoShow == true;
+			FollowMenu = Config.FollowMenu ~= false;
+		}, UIApi);
+
+		local Popout = Library:CreatePopout({
+			Title = Config.Title or 'Panel';
+			Version = Config.Version;
+			Size = Config.Size or Vector2.new(300, 200);
+			Position = Config.Position;
+			Center = Config.Center;
+			AutoShow = false;
+		});
+
+		Panel.Window = Popout;
+		Panel.Holder = Popout.Holder;
+		Panel.Container = Popout.Container;
+
+		---Re-evaluate whether the panel should be on screen.
+		function Panel:Refresh()
+			Popout.Holder.Visible = Panel.Wanted == true
+				and ((not Panel.FollowMenu) or Library:IsMenuOpen());
+		end;
+
+		---Show or hide the panel.
+		---@param Visible boolean
+		function Panel:SetVisible(Visible)
+			Panel.Wanted = Visible and true or false;
+			Panel:Refresh();
+			return Panel;
+		end;
+
+		function Panel:Show()
+			return Panel:SetVisible(true);
+		end;
+
+		function Panel:Hide()
+			return Panel:SetVisible(false);
+		end;
+
+		---Flip the panel. Overrides UIApi:Toggle, which drives the main menu.
+		function Panel:Toggle()
+			return Panel:SetVisible(not Panel.Wanted);
+		end;
+
+		function Panel:IsVisible()
+			return Popout.Holder.Visible;
+		end;
+
+		---Resize the panel to fit its contents again. Called for you when
+		---elements are added, this is for when you change one by hand.
+		function Panel:Resize()
+			return Popout:Resize();
+		end;
+
+		---Destroy the panel and free the flags it registered.
+		function Panel:Remove()
+			for Idx in next, Panel.Elements do
+				Toggles[Idx] = nil;
+				Options[Idx] = nil;
+			end;
+
+			table.clear(Panel.Elements);
+			Popout.Holder:Destroy();
+		end;
+
+		-- Close cross in the title bar. Falls back to hiding itself when no
+		-- owning toggle claimed it.
+		if Config.CloseButton ~= false then
+			local Close = Library:Create('TextButton', {
+				Name = 'Close';
+				BackgroundTransparency = 1;
+				AutoButtonColor = false;
+				Position = UDim2.new(1, -20, 0, 0);
+				Size = UDim2.fromOffset(16, 25);
+				Font = Library.Font;
+				Text = 'X';
+				TextSize = 14;
+				TextColor3 = Library.FontColor;
+				ZIndex = 6;
+				Parent = Popout.Holder;
+			});
+
+			Library:AddToRegistry(Close, {
+				TextColor3 = 'FontColor';
+			});
+
+			Library:OnHighlight(Close, Close,
+				{ TextColor3 = 'AccentColor' },
+				{ TextColor3 = 'FontColor' }
+			);
+
+			Close.MouseButton1Click:Connect(function()
+				if Panel.OnClose then
+					Panel.OnClose();
+				else
+					Panel:Hide();
+				end;
+			end);
+		end;
+
+		buildElements(Popout, Config.Elements, Panel);
+
+		Library:OnMenuToggled(function()
+			Panel:Refresh();
+		end);
+
+		Panel:Refresh();
+
+		return Panel;
+	end;
+
 	---Read an element's current value by flag.
 	---@param Idx string
 	function UIApi:Get(Idx)
@@ -6692,14 +6883,74 @@ do
 		return self.Groupboxes[Name];
 	end;
 
+	---The popout panel a toggle owns, by that toggle's flag.
+	---@param Idx string
+	function UIApi:Panel(Idx)
+		return self.Panels[Idx];
+	end;
+
 	---Open or close the menu.
 	function UIApi:Toggle()
 		return Library:Toggle();
 	end;
 
+	---Drop only the tabs this UI built, leaving the rest of the menu alone.
+	---Use this when a config was built into a window that already existed.
+	function UIApi:Remove()
+		for _, Panel in next, self.Panels do
+			if type(Panel) == 'table' and Panel.Remove then
+				Panel:Remove();
+			end;
+		end;
+
+		for _, Tab in next, self.Tabs do
+			if type(Tab) == 'table' and Tab.Remove then
+				Tab:Remove();
+			end;
+		end;
+
+		-- Free the flags back up so the same config can be rebuilt later.
+		for Idx in next, self.Elements do
+			Toggles[Idx] = nil;
+			Options[Idx] = nil;
+		end;
+
+		table.clear(self.Tabs);
+		table.clear(self.Groupboxes);
+		table.clear(self.Elements);
+		table.clear(self.Panels);
+	end;
+
 	---Tear the whole menu down.
 	function UIApi:Unload()
 		return Library:Unload();
+	end;
+
+	---Add tabs from a config table to a window that already exists. Same Tabs
+	---shape CreateUI takes, minus the window options.
+	---@param Window table whatever Library:CreateWindow returned
+	---@param Config table a table holding a Tabs list
+	---@return table
+	function Library:BuildUI(Window, Config)
+		Config = Config or {};
+
+		local UI = setmetatable({
+			Window = Window;
+			Tabs = {};
+			Groupboxes = {};
+			Elements = {};
+			Panels = {};
+		}, UIApi);
+
+		for Index, TabConfig in ipairs(Config.Tabs or {}) do
+			local Name = TabConfig.Name or ('Tab ' .. Index);
+			local Tab = Window:AddTab(Name);
+
+			UI.Tabs[Name] = Tab;
+			buildTab(Tab, TabConfig, UI);
+		end;
+
+		return UI;
 	end;
 
 	---Build a menu from one config table.
@@ -6708,12 +6959,6 @@ do
 	function Library:CreateUI(Config)
 		Config = Config or {};
 
-		local UI = setmetatable({
-			Tabs = {};
-			Groupboxes = {};
-			Elements = {};
-		}, UIApi);
-
 		-- Centre only when the caller did not place the window itself.
 		local Center = Config.Center;
 
@@ -6721,7 +6966,7 @@ do
 			Center = Config.Position == nil;
 		end;
 
-		UI.Window = Library:CreateWindow({
+		local Window = Library:CreateWindow({
 			Title = Config.Title or 'Library';
 			ColoredTitle = Config.ColoredTitle;
 			Version = Config.Version;
@@ -6755,13 +7000,7 @@ do
 			BackgroundDimColor = Config.BackgroundDimColor;
 		});
 
-		for Index, TabConfig in ipairs(Config.Tabs or {}) do
-			local Name = TabConfig.Name or ('Tab ' .. Index);
-			local Tab = UI.Window:AddTab(Name);
-
-			UI.Tabs[Name] = Tab;
-			buildTab(Tab, TabConfig, UI);
-		end;
+		local UI = Library:BuildUI(Window, Config);
 
 		Library.UI = UI;
 
