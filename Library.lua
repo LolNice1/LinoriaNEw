@@ -61,12 +61,6 @@ local Library = {
 	-- Width of the vertical tab strip on the left of the window.
 	TabStripWidth = 132;
 
-	-- Accent coloured glow drawn behind the window frame. Rides the registry so
-	-- it repaints with whatever the accent picker is set to.
-	GlowEnabled = true;
-	GlowSize = 26;
-	GlowTransparency = 0.5;
-	GlowImage = 'rbxassetid://5028857084';
 
 	-- Slider fill easing. Higher is snappier, 0 disables the lerp entirely.
 	SliderLerpSpeed = 16;
@@ -786,90 +780,6 @@ end;
 function Library:SetBackgroundDimColor(Color)
 	Library.BackgroundDimColor = Color;
 	Library:UpdateBackgroundDim(true);
-end;
-
--- < Window glow >
--- Accent coloured bloom bleeding out of a frame's edges. Every glow made here
--- is tracked so a live accent or size change repaints all of them at once.
-Library.Glows = {};
-
----Hang a glow off a frame. Painted at ZIndex 0 so it sits under the window it
----belongs to, and registered so the accent picker drives its colour.
----@param Frame Frame the window frame to wrap
----@return ImageLabel
-function Library:ApplyGlow(Frame)
-	local Padding = math.clamp(tonumber(Library.GlowSize) or 0, 0, 128);
-
-	local Glow = Library:Create('ImageLabel', {
-		Name = 'Glow';
-		BackgroundTransparency = 1;
-		AnchorPoint = Vector2.new(0.5, 0.5);
-		Position = UDim2.fromScale(0.5, 0.5);
-		Size = UDim2.new(1, Padding * 2, 1, Padding * 2);
-		Image = Library.GlowImage or 'rbxassetid://5028857084';
-		ImageColor3 = Library.AccentColor;
-		ImageTransparency = math.clamp(tonumber(Library.GlowTransparency) or 0.5, 0, 1);
-		ScaleType = Enum.ScaleType.Slice;
-		SliceCenter = Rect.new(24, 24, 276, 276);
-		Visible = Library.GlowEnabled ~= false and Padding > 0;
-		ZIndex = 0;
-		Parent = Frame;
-	});
-
-	Library:AddToRegistry(Glow, {
-		ImageColor3 = 'AccentColor';
-	});
-
-	Library.Glows[Glow] = true;
-
-	return Glow;
-end;
-
----Repaint every glow from the current Library state.
-function Library:UpdateGlow()
-	local Padding = math.clamp(tonumber(Library.GlowSize) or 0, 0, 128);
-	local Transparency = math.clamp(tonumber(Library.GlowTransparency) or 0.5, 0, 1);
-	local Shown = Library.GlowEnabled ~= false and Padding > 0;
-
-	for Glow in next, Library.Glows do
-		if not Glow.Parent then
-			Library.Glows[Glow] = nil;
-			continue;
-		end;
-
-		Glow.Image = Library.GlowImage or 'rbxassetid://5028857084';
-		Glow.ImageColor3 = Library.AccentColor;
-		Glow.ImageTransparency = Transparency;
-		Glow.Size = UDim2.new(1, Padding * 2, 1, Padding * 2);
-		Glow.Visible = Shown;
-
-		-- Drop the cached fade value, otherwise the next menu toggle tweens the
-		-- glow back to whatever transparency it was built with.
-		if Library.TransparencyCache then
-			Library.TransparencyCache[Glow] = nil;
-		end;
-	end;
-end;
-
----Flip the glow on or off at runtime.
----@param Bool boolean
-function Library:SetGlow(Bool)
-	Library.GlowEnabled = Bool and true or false;
-	Library:UpdateGlow();
-end;
-
----How far the glow bleeds past the window edge, in pixels.
----@param Value number
-function Library:SetGlowSize(Value)
-	Library.GlowSize = math.clamp(tonumber(Value) or 0, 0, 128);
-	Library:UpdateGlow();
-end;
-
----0 = solid glow, 1 = invisible.
----@param Value number
-function Library:SetGlowTransparency(Value)
-	Library.GlowTransparency = math.clamp(tonumber(Value) or 0, 0, 1);
-	Library:UpdateGlow();
 end;
 
 -- < Snow >
@@ -4723,9 +4633,6 @@ function Library:CreatePopout(Config)
 
 	Library:MakeDraggableOutline(Outer, 25);
 
-	-- Popouts get the same accent bloom as the main window.
-	Library:ApplyGlow(Outer);
-
 	local Inner = Library:Create('Frame', {
 		BackgroundColor3 = Library.MainColor;
 		BorderColor3 = Library.OutlineColor;
@@ -4987,18 +4894,6 @@ function Library:CreateWindow(...)
 		Library.SnowColor = Config.SnowColor;
 	end;
 
-	-- Glow config, read before the frame is built so Glow = false never flashes.
-	if type(Config.Glow) == 'boolean' then
-		Library.GlowEnabled = Config.Glow;
-	end;
-
-	if type(Config.GlowSize) == 'number' then
-		Library.GlowSize = math.clamp(Config.GlowSize, 0, 128);
-	end;
-
-	if type(Config.GlowTransparency) == 'number' then
-		Library.GlowTransparency = math.clamp(Config.GlowTransparency, 0, 1);
-	end;
 
 	Library.UISize = Config.Size;
 
@@ -5021,9 +4916,6 @@ function Library:CreateWindow(...)
 	});
 
 	Library:MakeDraggableOutline(Outer, 25);
-
-	-- Accent bloom bleeding out of every edge of the window.
-	Library.WindowGlow = Library:ApplyGlow(Outer);
 
 	local Inner = Library:Create('Frame', {
 		BackgroundColor3 = Library.MainColor;
@@ -6366,9 +6258,6 @@ function Library:CreateWindow(...)
 	local Toggled = false;
 	local Fading = false;
 
-	-- Exposed so live cosmetic changes (the glow, mostly) can drop their cached
-	-- fade target instead of being tweened back to the build-time value.
-	Library.TransparencyCache = TransparencyCache;
 
 	function Library:Toggle()
 		if Fading then
@@ -6986,11 +6875,6 @@ do
 
 			Image = Config.Image;
 			ImageSize = Config.ImageSize;
-
-			Glow = Config.Glow;
-			GlowSize = Config.GlowSize;
-			GlowTransparency = Config.GlowTransparency;
-
 			Snow = Config.Snow;
 			SnowCount = Config.SnowCount;
 			SnowColor = Config.SnowColor;
